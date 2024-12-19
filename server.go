@@ -3,10 +3,10 @@ package socks5
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 
@@ -43,10 +43,13 @@ type Server struct {
 	// bindIP is used for bind or udp associate
 	bindIP net.IP
 	// logger can be used to provide a custom log target.
-	// Defaults to ioutil.Discard.
+	// Defaults to io.Discard.
 	logger Logger
-	// Optional function for dialing out
+	// Optional function for dialing out.
+	// The callback set by dialWithRequest will be called first.
 	dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Optional function for dialing out with the access of request detail.
+	dialWithRequest func(ctx context.Context, network, addr string, request *Request) (net.Conn, error)
 	// buffer pool
 	bufferPool bufferpool.BufPool
 	// goroutine pool
@@ -55,6 +58,10 @@ type Server struct {
 	userConnectHandle   func(ctx context.Context, writer io.Writer, request *Request) error
 	userBindHandle      func(ctx context.Context, writer io.Writer, request *Request) error
 	userAssociateHandle func(ctx context.Context, writer io.Writer, request *Request) error
+	// user's middleware
+	userConnectMiddlewares   MiddlewareChain
+	userBindMiddlewares      MiddlewareChain
+	userAssociateMiddlewares MiddlewareChain
 }
 
 // NewServer creates a new Server
@@ -64,10 +71,7 @@ func NewServer(opts ...Option) *Server {
 		bufferPool:  bufferpool.NewPool(32 * 1024),
 		resolver:    DNSResolver{},
 		rules:       NewPermitAll(),
-		logger:      NewLogger(log.New(ioutil.Discard, "socks5: ", log.LstdFlags)),
-		dial: func(ctx context.Context, net_, addr string) (net.Conn, error) {
-			return net.Dial(net_, addr)
-		},
+		logger:      NewLogger(log.New(io.Discard, "socks5: ", log.LstdFlags)),
 	}
 
 	for _, opt := range opts {
@@ -88,6 +92,15 @@ func NewServer(opts ...Option) *Server {
 // ListenAndServe is used to create a listener and serve on it
 func (sf *Server) ListenAndServe(network, addr string) error {
 	l, err := net.Listen(network, addr)
+	if err != nil {
+		return err
+	}
+	return sf.Serve(l)
+}
+
+// ListenAndServeTLS is used to create a TLS listener and serve on it
+func (sf *Server) ListenAndServeTLS(network, addr string, c *tls.Config) error {
+	l, err := tls.Listen(network, addr, c)
 	if err != nil {
 		return err
 	}
@@ -175,7 +188,7 @@ func (sf *Server) authenticate(conn io.Writer, bufConn io.Reader,
 		}
 	}
 	// No usable method found
-	conn.Write([]byte{statute.VersionSocks5, statute.MethodNoAcceptable}) // nolint: errcheck
+	conn.Write([]byte{statute.VersionSocks5, statute.MethodNoAcceptable}) //nolint: errcheck
 	return nil, statute.ErrNoSupportedAuth
 }
 
